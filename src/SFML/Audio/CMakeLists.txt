@@ -48,6 +48,8 @@ set(CODECS_SRC
     ${SRCROOT}/SoundFileReaderMp3.cpp
     ${SRCROOT}/SoundFileReaderOgg.hpp
     ${SRCROOT}/SoundFileReaderOgg.cpp
+    ${SRCROOT}/SoundFileReaderQoa.cpp
+    ${SRCROOT}/SoundFileReaderQoa.hpp
     ${SRCROOT}/SoundFileReaderWav.hpp
     ${SRCROOT}/SoundFileReaderWav.cpp
     ${INCROOT}/SoundFileWriter.hpp
@@ -190,8 +192,8 @@ find_package(Threads REQUIRED)
 
 # define the sfml-audio target
 sfml_add_library(Audio
-                 SOURCES ${SRC} ${CODECS_SRC}
-                 DEPENDENCIES "Dependencies.cmake.in")
+    SOURCES ${SRC} ${CODECS_SRC}
+    DEPENDENCIES "Dependencies.cmake.in")
 
 # avoids warnings in vorbisfile.h
 target_compile_definitions(sfml-audio PRIVATE OV_EXCLUDE_STATIC_CALLBACKS FLAC__NO_DLL)
@@ -207,8 +209,8 @@ target_compile_definitions(sfml-audio PRIVATE SFML_IS_BIG_ENDIAN=$<STREQUAL:${CM
 
 # setup dependencies
 target_link_libraries(sfml-audio
-                      PUBLIC SFML::System
-                      PRIVATE Vorbis::vorbis Vorbis::vorbisfile Vorbis::vorbisenc FLAC::FLAC Threads::Threads)
+    PUBLIC SFML::System
+    PRIVATE Vorbis::vorbis Vorbis::vorbisfile Vorbis::vorbisenc FLAC::FLAC Threads::Threads)
 if(SFML_OS_IOS)
     target_link_libraries(sfml-audio PRIVATE "-framework Foundation" "-framework CoreFoundation" "-framework CoreAudio" "-framework AudioToolbox" "-framework AVFoundation")
 endif()
