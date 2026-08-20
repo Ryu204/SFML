@@ -25,6 +25,7 @@
 ////////////////////////////////////////////////////////////
 // Headers
 ////////////////////////////////////////////////////////////
+#include "SFML/Audio/SoundChannel.hpp"
 #include "SFML/System/Err.hpp"
 #include "SFML/System/InputStream.hpp"
 
@@ -57,9 +58,64 @@ constexpr std::size_t fileHeaderSizeByte            = 8;
 constexpr std::size_t frameHeaderSizeByte           = 8;
 constexpr std::size_t lmsStatePerChannelSizeByte    = 16;
 constexpr std::size_t sliceSizeByte                 = 8;
-constexpr std::size_t frameSlicesPerChannelSizeByte = 256 * sliceSizeByte;
+constexpr std::size_t frameSlicesPerChannel         = 256;
+constexpr std::size_t frameSlicesPerChannelSizeByte = frameSlicesPerChannel * sliceSizeByte;
 // 1 channel audio, 16 bytes LMS state and 256 slices with 8 bytes each
 constexpr std::size_t frameBodyPerChannelSizeByte = lmsStatePerChannelSizeByte + frameSlicesPerChannelSizeByte;
+
+const std::array<std::vector<sf::SoundChannel>, maxChannels + 1> channelMaps = {
+    std::vector<sf::SoundChannel>{},
+    {sf::SoundChannel::Mono},
+    {sf::SoundChannel::FrontLeft, sf::SoundChannel::FrontRight},
+    {sf::SoundChannel::FrontLeft, sf::SoundChannel::FrontRight, sf::SoundChannel::FrontCenter},
+    {
+        sf::SoundChannel::FrontLeft,
+        sf::SoundChannel::FrontRight,
+        sf::SoundChannel::BackLeft,
+        sf::SoundChannel::BackRight,
+    },
+    {
+        sf::SoundChannel::FrontLeft,
+        sf::SoundChannel::FrontRight,
+        sf::SoundChannel::FrontCenter,
+        sf::SoundChannel::BackLeft,
+        sf::SoundChannel::BackRight,
+    },
+    {
+        sf::SoundChannel::FrontLeft,
+        sf::SoundChannel::FrontRight,
+        sf::SoundChannel::FrontCenter,
+        sf::SoundChannel::LowFrequencyEffects,
+        sf::SoundChannel::BackLeft,
+        sf::SoundChannel::BackRight,
+    },
+    {
+        sf::SoundChannel::FrontLeft,
+        sf::SoundChannel::FrontRight,
+        sf::SoundChannel::FrontCenter,
+        sf::SoundChannel::LowFrequencyEffects,
+        sf::SoundChannel::BackCenter,
+        sf::SoundChannel::SideLeft,
+        sf::SoundChannel::SideRight,
+    },
+    {
+        sf::SoundChannel::FrontLeft,
+        sf::SoundChannel::FrontRight,
+        sf::SoundChannel::FrontCenter,
+        sf::SoundChannel::LowFrequencyEffects,
+        sf::SoundChannel::BackLeft,
+        sf::SoundChannel::BackRight,
+        sf::SoundChannel::SideLeft,
+        sf::SoundChannel::SideRight,
+    },
+
+};
+
+std::vector<sf::SoundChannel> getChannelMap(std::size_t numChannels)
+{
+    assert(numChannels >= minChannels && numChannels <= maxChannels);
+    return channelMaps[numChannels];
+}
 } // namespace QoaSpecs
 
 template <typename ReturnType, typename Iter>
@@ -106,6 +162,28 @@ struct HeaderContent
     }
 };
 
+class QoaSlice
+{
+public:
+    QoaSlice(std::uint64_t bits) : m_bits{bits}
+    {
+    }
+
+    [[nodiscard]] std::uint8_t sfQuant() const
+    {
+        return m_bits >> 60;
+    }
+
+    [[nodiscard]] std::uint8_t qr0x(unsigned int x) const
+    {
+        assert(x >= 0 && x < 20);
+        return (m_bits >> (3 * (19 - x))) & 3;
+    }
+
+private:
+    std::uint64_t m_bits;
+};
+
 struct FrameContent
 {
     struct Header
@@ -146,7 +224,36 @@ struct FrameContent
         }
     };
 
+    struct Body
+    {
+        struct LmsState
+        {
+            std::array<std::int16_t, 4> lmsHistory;
+            std::array<std::int16_t, 4> lmsWeights;
+        };
+
+        std::vector<LmsState>                                              lmsStatePerChannel;
+        std::vector<std::array<QoaSlice, QoaSpecs::frameSlicesPerChannel>> slicesPerChannel;
+
+        [[nodiscard]] static std::optional<Body> readFrom(sf::InputStream& stream)
+        {
+        }
+
+        [[nodiscard]] std::optional<std::string_view> checkError() const
+        {
+        }
+    };
+
     Header header;
+    Body   body;
+
+    [[nodiscard]] static std::optional<Body> readFrom(sf::InputStream& stream)
+    {
+    }
+
+    [[nodiscard]] std::optional<std::string_view> checkError() const
+    {
+    }
 };
 } // namespace
 
@@ -186,8 +293,21 @@ std::optional<SoundFileReader::Info> SoundFileReaderQoa::open(InputStream& strea
     if (const auto error = firstFrameHeader->checkError(*headerContent); error)
     {
         err() << "Invalid QOA file frame header: " << *error << std::endl;
+        return std::nullopt;
     }
-    m_channelCount =
+
+    m_channelCount = firstFrameHeader->numChannels;
+    m_sampleRate   = firstFrameHeader->sampleRate;
+    m_currentFrameSamples.clear();
+    m_currentFrameNextSampleIndex = 0;
+
+    Info info{};
+    info.channelCount = m_channelCount;
+    info.sampleRate   = m_sampleRate;
+    info.sampleCount  = headerContent->samplesPerChannel * info.channelCount;
+    info.channelMap   = QoaSpecs::getChannelMap(m_channelCount);
+
+    return info;
 }
 
 

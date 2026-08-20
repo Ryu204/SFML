@@ -29,6 +29,8 @@
 ////////////////////////////////////////////////////////////
 #include <SFML/Audio/SoundFileReader.hpp>
 
+#include <cstdint>
+
 
 namespace sf
 {
@@ -100,8 +102,10 @@ private:
     ////////////////////////////////////////////////////////////
     // Member data
     ////////////////////////////////////////////////////////////
-    std::uint32_t m_channelCount{}; //!< Number of channels
-    std::uint32_t m_sampleRate{};   //!< Number of samples rate per channel
+    std::uint32_t             m_channelCount{};      //!< Number of channels
+    std::uint32_t             m_sampleRate{};        //!< Number of samples rate per channel
+    std::vector<std::int16_t> m_currentFrameSamples; //!< Decoded samples of last processed frame
+    std::uint32_t m_currentFrameNextSampleIndex{};   //!< Index of next unread sample in the last processed frame
 };
 
 } // namespace sf::priv
