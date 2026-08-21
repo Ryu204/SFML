@@ -36,6 +36,8 @@
 #include <array>
 #include <optional>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 
 #include <cassert>
 #include <cstdint>
@@ -121,7 +123,8 @@ std::vector<sf::SoundChannel> getChannelMap(std::size_t numChannels)
 template <typename ReturnType, typename Iter>
 ReturnType readBigEndianUnsignedInt(Iter begin, std::size_t size)
 {
-    assert(size >= 1);
+    static_assert(std::is_unsigned_v<ReturnType>);
+    assert(size >= 1 && size <= sizeof(ReturnType));
     ReturnType result = 0;
     auto       shift  = size * 8;
     for (std::size_t i = 0; i < size; ++i)
@@ -130,6 +133,13 @@ ReturnType readBigEndianUnsignedInt(Iter begin, std::size_t size)
         result += static_cast<ReturnType>(*(begin + static_cast<std::ptrdiff_t>(i))) << shift;
     }
     return result;
+}
+
+template <typename ReturnType, typename Iter>
+inline ReturnType readBigEndianSignedInt(Iter begin)
+{
+    static_assert(std::is_signed_v<ReturnType>);
+    return static_cast<ReturnType>(readBigEndianUnsignedInt<std::make_unsigned_t<ReturnType>>(begin, sizeof(ReturnType)));
 }
 
 struct HeaderContent
@@ -165,8 +175,14 @@ struct HeaderContent
 class QoaSlice
 {
 public:
-    QoaSlice(std::uint64_t bits) : m_bits{bits}
+    explicit QoaSlice(std::uint64_t bits) : m_bits{bits}
     {
+    }
+
+    QoaSlice& operator=(std::uint64_t bits)
+    {
+        m_bits = bits;
+        return *this;
     }
 
     [[nodiscard]] std::uint8_t sfQuant() const
@@ -228,8 +244,8 @@ struct FrameContent
     {
         struct LmsState
         {
-            std::array<std::int16_t, 4> lmsHistory;
-            std::array<std::int16_t, 4> lmsWeights;
+            std::array<std::int16_t, 4> history;
+            std::array<std::int16_t, 4> weights;
         };
 
         std::vector<LmsState>                                              lmsStatePerChannel;
@@ -237,22 +253,69 @@ struct FrameContent
 
         [[nodiscard]] static std::optional<Body> readFrom(sf::InputStream& stream)
         {
+            thread_local std::array<std::uint8_t, std::max<std::size_t>(QoaSpecs::lmsStatePerChannelSizeByte, QoaSpecs::frameSlicesPerChannelSizeByte)>
+                 buffer;
+            Body body;
+            for (auto& channelLmsState : body.lmsStatePerChannel)
+            {
+                if (stream.read(buffer.data(), QoaSpecs::lmsStatePerChannelSizeByte) != QoaSpecs::lmsStatePerChannelSizeByte)
+                    return std::nullopt;
+
+                auto currentIter = buffer.begin();
+                for (auto& elem : channelLmsState.history)
+                {
+                    elem = readBigEndianSignedInt<std::int16_t>(currentIter);
+                    currentIter += 2;
+                }
+                for (auto& elem : channelLmsState.weights)
+                {
+                    elem = readBigEndianSignedInt<std::int16_t>(currentIter);
+                    currentIter += 2;
+                }
+            }
+            for (auto& channelSlices : body.slicesPerChannel)
+            {
+                if (stream.read(buffer.data(), QoaSpecs::frameSlicesPerChannelSizeByte) !=
+                    QoaSpecs::frameSlicesPerChannelSizeByte)
+                    return std::nullopt;
+
+                auto currentIter = buffer.begin();
+                for (auto& slice : channelSlices)
+                {
+                    slice = readBigEndianUnsignedInt<std::uint64_t>(currentIter, 8);
+                    currentIter += 8;
+                }
+            }
+            return body;
         }
 
         [[nodiscard]] std::optional<std::string_view> checkError() const
         {
+            return std::nullopt;
         }
     };
 
     Header header;
     Body   body;
 
-    [[nodiscard]] static std::optional<Body> readFrom(sf::InputStream& stream)
+    [[nodiscard]] static std::optional<FrameContent> readFrom(sf::InputStream& stream)
     {
+        auto header = Header::readFrom(stream);
+        if (!header)
+            return std::nullopt;
+        auto body = Body::readFrom(stream);
+        if (!body)
+            return std::nullopt;
+        return FrameContent{*header, *body};
     }
 
-    [[nodiscard]] std::optional<std::string_view> checkError() const
+    [[nodiscard]] std::optional<std::string_view> checkError(HeaderContent& fileHeader) const
     {
+        if (auto err = header.checkError(fileHeader); err)
+            return err;
+        if (auto err = body.checkError(); err)
+            return err;
+        return std::nullopt;
     }
 };
 } // namespace
@@ -320,7 +383,32 @@ void SoundFileReaderQoa::seek(std::uint64_t sampleOffset)
 ////////////////////////////////////////////////////////////
 std::uint64_t SoundFileReaderQoa::read(std::int16_t* samples, std::uint64_t maxCount)
 {
+    auto unfilledCount = maxCount;
+    while (unfilledCount > 0)
+    {
+        if (m_currentFrameNextSampleIndex >= m_currentFrameSamples.size())
+        {
+            if (const auto error = decodeNextFrame(); error)
+            {
+                err() << "Failed to decode QOA file frame: " << *error << std::endl;
+                return maxCount - unfilledCount;
+            }
+        }
+        const auto filledSamples = readCurrentDecodedFrame(samples, unfilledCount);
+        assert(filledSamples > 0 && filledSamples <= unfilledCount);
+        unfilledCount -= filledSamples;
+        samples += filledSamples;
+        if (unfilledCount == 0)
+            return maxCount;
+    }
+    assert(false);
     return 0;
 }
 
+
+////////////////////////////////////////////////////////////
+std::uint64_t SoundFileReaderQoa::readCurrentDecodedFrame(std::int16_t* samples, std::uint64_t maxCount)
+{
+    const auto remainingSamplesInFrame = m_currentFrameSamples.size() - m_currentFrameNextSampleIndex - 1;
+}
 } // namespace sf::priv

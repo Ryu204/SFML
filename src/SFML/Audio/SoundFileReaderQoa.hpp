@@ -29,6 +29,8 @@
 ////////////////////////////////////////////////////////////
 #include <SFML/Audio/SoundFileReader.hpp>
 
+#include <string_view>
+
 #include <cstdint>
 
 
@@ -99,6 +101,25 @@ public:
     [[nodiscard]] std::uint64_t read(std::int16_t* samples, std::uint64_t maxCount) override;
 
 private:
+    ////////////////////////////////////////////////////////////
+    /// \brief Read audio samples from last decoded frame
+    ///
+    /// \param samples  Pointer to the sample array to fill
+    /// \param maxCount Maximum number of samples to read
+    ///
+    /// \return Number of samples actually read (may be less than \a maxCount)
+    ///
+    ////////////////////////////////////////////////////////////
+    std::uint64_t readCurrentDecodedFrame(std::int16_t* samples, std::uint64_t maxCount);
+
+    ////////////////////////////////////////////////////////////
+    /// \brief Decode the next frame in the stream
+    ///
+    /// \return An error message on failure and std::nullopt on success
+    ///
+    ////////////////////////////////////////////////////////////
+    std::optional<std::string_view> decodeNextFrame();
+
     ////////////////////////////////////////////////////////////
     // Member data
     ////////////////////////////////////////////////////////////
