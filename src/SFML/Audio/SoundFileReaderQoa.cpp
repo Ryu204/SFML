@@ -34,13 +34,15 @@
 #include <SFML/System/FileInputStream.hpp>
 
 #include <array>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <type_traits>
-#include <utility>
 
 #include <cassert>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 
 
 namespace
@@ -48,28 +50,32 @@ namespace
 
 namespace QoaSpecs
 {
-std::uint32_t magicBytes = 0x716F6166; // "qoaf"
-
-constexpr std::size_t maxSampleRate = 0xFFFFFF;
-constexpr std::size_t minSampleRate = 1;
-
-constexpr std::size_t minChannels = 1;
-constexpr std::size_t maxChannels = 8;
-
-constexpr std::size_t fileHeaderSizeByte            = 8;
-constexpr std::size_t frameHeaderSizeByte           = 8;
-constexpr std::size_t lmsStatePerChannelSizeByte    = 16;
-constexpr std::size_t sliceSizeByte                 = 8;
-constexpr std::size_t frameSlicesPerChannel         = 256;
-constexpr std::size_t frameSlicesPerChannelSizeByte = frameSlicesPerChannel * sliceSizeByte;
-// 1 channel audio, 16 bytes LMS state and 256 slices with 8 bytes each
-constexpr std::size_t frameBodyPerChannelSizeByte = lmsStatePerChannelSizeByte + frameSlicesPerChannelSizeByte;
+std::uint32_t         magicBytes                 = 0x716F6166; // "qoaf"
+constexpr std::size_t maxSampleRate              = 0xFFFFFF;
+constexpr std::size_t minSampleRate              = 1;
+constexpr std::size_t minChannels                = 1;
+constexpr std::size_t maxChannels                = 8;
+constexpr std::size_t fileHeaderSizeByte         = 8;
+constexpr std::size_t frameHeaderSizeByte        = 8;
+constexpr std::size_t lmsStatePerChannelSizeByte = 16;
+constexpr std::size_t sliceSizeByte              = 8;
+constexpr std::size_t samplesPerSlice            = 20;
+constexpr std::size_t maxFrameSlicesPerChannel   = 256;
 
 const std::array<std::vector<sf::SoundChannel>, maxChannels + 1> channelMaps = {
     std::vector<sf::SoundChannel>{},
-    {sf::SoundChannel::Mono},
-    {sf::SoundChannel::FrontLeft, sf::SoundChannel::FrontRight},
-    {sf::SoundChannel::FrontLeft, sf::SoundChannel::FrontRight, sf::SoundChannel::FrontCenter},
+    {
+        sf::SoundChannel::Mono,
+    },
+    {
+        sf::SoundChannel::FrontLeft,
+        sf::SoundChannel::FrontRight,
+    },
+    {
+        sf::SoundChannel::FrontLeft,
+        sf::SoundChannel::FrontRight,
+        sf::SoundChannel::FrontCenter,
+    },
     {
         sf::SoundChannel::FrontLeft,
         sf::SoundChannel::FrontRight,
@@ -110,27 +116,54 @@ const std::array<std::vector<sf::SoundChannel>, maxChannels + 1> channelMaps = {
         sf::SoundChannel::SideLeft,
         sf::SoundChannel::SideRight,
     },
-
 };
+} // namespace QoaSpecs
 
 std::vector<sf::SoundChannel> getChannelMap(std::size_t numChannels)
 {
-    assert(numChannels >= minChannels && numChannels <= maxChannels);
-    return channelMaps[numChannels];
+    assert(numChannels >= QoaSpecs::minChannels && numChannels <= QoaSpecs::maxChannels);
+    return QoaSpecs::channelMaps[numChannels];
 }
-} // namespace QoaSpecs
+
+template <typename Num>
+constexpr std::int16_t clampInt16(Num value)
+{
+    constexpr auto min = std::numeric_limits<std::int16_t>::min();
+    constexpr auto max = std::numeric_limits<std::int16_t>::max();
+    return value < min ? min : value > max ? max : static_cast<std::int16_t>(value);
+}
+
+constexpr std::array<std::array<int, 8>, 16> dequantTab = {
+    std::array{1, -1, 3, -3, 5, -5, 7, -7},
+    {5, -5, 18, -18, 32, -32, 49, -49},
+    {16, -16, 53, -53, 95, -95, 147, -147},
+    {34, -34, 113, -113, 203, -203, 315, -315},
+    {63, -63, 210, -210, 378, -378, 588, -588},
+    {104, -104, 345, -345, 621, -621, 966, -966},
+    {158, -158, 528, -528, 950, -950, 1477, -1477},
+    {228, -228, 760, -760, 1368, -1368, 2128, -2128},
+    {316, -316, 1053, -1053, 1895, -1895, 2947, -2947},
+    {422, -422, 1405, -1405, 2529, -2529, 3934, -3934},
+    {548, -548, 1828, -1828, 3290, -3290, 5117, -5117},
+    {696, -696, 2320, -2320, 4176, -4176, 6496, -6496},
+    {868, -868, 2893, -2893, 5207, -5207, 8099, -8099},
+    {1064, -1064, 3548, -3548, 6386, -6386, 9933, -9933},
+    {1286, -1286, 4288, -4288, 7718, -7718, 12005, -12005},
+    {1536, -1536, 5120, -5120, 9216, -9216, 14336, -14336},
+};
 
 template <typename ReturnType, typename Iter>
 ReturnType readBigEndianUnsignedInt(Iter begin, std::size_t size)
 {
     static_assert(std::is_unsigned_v<ReturnType>);
+    static_assert(std::is_unsigned_v<std::decay_t<decltype(*begin)>>);
     assert(size >= 1 && size <= sizeof(ReturnType));
     ReturnType result = 0;
     auto       shift  = size * 8;
     for (std::size_t i = 0; i < size; ++i)
     {
         shift -= 8;
-        result += static_cast<ReturnType>(*(begin + static_cast<std::ptrdiff_t>(i))) << shift;
+        result += static_cast<ReturnType>(static_cast<ReturnType>(*(begin + static_cast<std::ptrdiff_t>(i))) << shift);
     }
     return result;
 }
@@ -151,11 +184,6 @@ struct HeaderContent
         return samplesPerChannel == 0;
     }
 
-    [[nodiscard]] bool isValid() const
-    {
-        return samplesPerChannel >= 0;
-    }
-
     static std::optional<HeaderContent> readFrom(sf::InputStream& stream)
     {
         std::array<std::uint8_t, QoaSpecs::fileHeaderSizeByte> header{};
@@ -167,7 +195,7 @@ struct HeaderContent
         if (magicBytes != QoaSpecs::magicBytes)
             return std::nullopt;
 
-        const auto samplesPerChannel = readBigEndianUnsignedInt<std::uint32_t>(header.begin(), 4);
+        const auto samplesPerChannel = readBigEndianUnsignedInt<std::uint32_t>(header.begin() + 4, 4);
         return HeaderContent{samplesPerChannel};
     }
 };
@@ -175,6 +203,8 @@ struct HeaderContent
 class QoaSlice
 {
 public:
+    QoaSlice() : QoaSlice(0) {};
+
     explicit QoaSlice(std::uint64_t bits) : m_bits{bits}
     {
     }
@@ -187,13 +217,13 @@ public:
 
     [[nodiscard]] std::uint8_t sfQuant() const
     {
-        return m_bits >> 60;
+        return static_cast<std::uint8_t>(m_bits >> 60);
     }
 
-    [[nodiscard]] std::uint8_t qr0x(unsigned int x) const
+    [[nodiscard]] std::uint8_t qr0x(std::size_t x) const
     {
-        assert(x >= 0 && x < 20);
-        return (m_bits >> (3 * (19 - x))) & 3;
+        assert(x < 20);
+        return static_cast<std::uint8_t>((m_bits >> (3 * (19 - x))) & 7);
     }
 
 private:
@@ -209,19 +239,26 @@ struct FrameContent
         std::uint16_t frameSizeByte;
         std::uint8_t  numChannels;
 
-        [[nodiscard]] std::optional<std::string_view> checkError(const HeaderContent& headerContent) const
+        [[nodiscard]] std::uint32_t slicesPerChannel() const
+        {
+            constexpr auto castedSamplesPerSlice = static_cast<std::uint32_t>(QoaSpecs::samplesPerSlice);
+            return (samplesPerChannel + castedSamplesPerSlice - 1) / castedSamplesPerSlice;
+        }
+
+        [[nodiscard]] std::optional<std::string_view> checkError() const
         {
             if (numChannels < QoaSpecs::minChannels || numChannels > QoaSpecs::maxChannels)
                 return "Number of channel in frame is out of bounds";
             if (sampleRate < QoaSpecs::minSampleRate || sampleRate > QoaSpecs::maxSampleRate)
                 return "Frame sample rate is not in supported range";
-            const auto isFrameSamplesInvalid = headerContent.isStreaming() &&
-                                               samplesPerChannel > headerContent.samplesPerChannel;
+            const auto slices = slicesPerChannel();
+            if (slices > QoaSpecs::maxFrameSlicesPerChannel || slices <= 0)
+                return "Invalid number of samples per frame";
             const auto computedFrameSizeByte = QoaSpecs::frameHeaderSizeByte +
-                                               QoaSpecs::frameBodyPerChannelSizeByte * numChannels;
-
+                                               (QoaSpecs::lmsStatePerChannelSizeByte + slices * QoaSpecs::sliceSizeByte) *
+                                                   numChannels;
             const auto isFrameSizeMismatch = frameSizeByte != computedFrameSizeByte;
-            if (isFrameSamplesInvalid || isFrameSizeMismatch)
+            if (isFrameSizeMismatch)
                 return "Corrupted frame data";
             return std::nullopt;
         }
@@ -248,14 +285,17 @@ struct FrameContent
             std::array<std::int16_t, 4> weights;
         };
 
-        std::vector<LmsState>                                              lmsStatePerChannel;
-        std::vector<std::array<QoaSlice, QoaSpecs::frameSlicesPerChannel>> slicesPerChannel;
+        std::vector<LmsState>                                                 lmsStatePerChannel;
+        std::vector<std::array<QoaSlice, QoaSpecs::maxFrameSlicesPerChannel>> slicesPerChannel;
 
-        [[nodiscard]] static std::optional<Body> readFrom(sf::InputStream& stream)
+        [[nodiscard]] static std::optional<Body> readFrom(sf::InputStream& stream, const Header& header)
         {
-            thread_local std::array<std::uint8_t, std::max<std::size_t>(QoaSpecs::lmsStatePerChannelSizeByte, QoaSpecs::frameSlicesPerChannelSizeByte)>
+            thread_local std::array<std::uint8_t,
+                                    std::max<std::size_t>(QoaSpecs::lmsStatePerChannelSizeByte,
+                                                          QoaSpecs::sliceSizeByte * QoaSpecs::maxFrameSlicesPerChannel)>
                  buffer;
             Body body;
+            body.lmsStatePerChannel.resize(header.numChannels);
             for (auto& channelLmsState : body.lmsStatePerChannel)
             {
                 if (stream.read(buffer.data(), QoaSpecs::lmsStatePerChannelSizeByte) != QoaSpecs::lmsStatePerChannelSizeByte)
@@ -273,17 +313,15 @@ struct FrameContent
                     currentIter += 2;
                 }
             }
-            for (auto& channelSlices : body.slicesPerChannel)
+            const auto slicesPerChannel = header.slicesPerChannel();
+            body.slicesPerChannel.resize(header.numChannels);
+            for (std::size_t sliceIndex = 0; sliceIndex < slicesPerChannel; ++sliceIndex)
             {
-                if (stream.read(buffer.data(), QoaSpecs::frameSlicesPerChannelSizeByte) !=
-                    QoaSpecs::frameSlicesPerChannelSizeByte)
-                    return std::nullopt;
-
-                auto currentIter = buffer.begin();
-                for (auto& slice : channelSlices)
+                for (auto& channelSlices : body.slicesPerChannel)
                 {
-                    slice = readBigEndianUnsignedInt<std::uint64_t>(currentIter, 8);
-                    currentIter += 8;
+                    if (stream.read(buffer.data(), QoaSpecs::sliceSizeByte) != QoaSpecs::sliceSizeByte)
+                        return std::nullopt;
+                    channelSlices[sliceIndex] = readBigEndianUnsignedInt<std::uint64_t>(buffer.begin(), QoaSpecs::sliceSizeByte);
                 }
             }
             return body;
@@ -301,23 +339,43 @@ struct FrameContent
     [[nodiscard]] static std::optional<FrameContent> readFrom(sf::InputStream& stream)
     {
         auto header = Header::readFrom(stream);
-        if (!header)
+        if (!header || header->checkError() != std::nullopt)
             return std::nullopt;
-        auto body = Body::readFrom(stream);
+        auto body = Body::readFrom(stream, *header);
         if (!body)
             return std::nullopt;
         return FrameContent{*header, *body};
     }
 
-    [[nodiscard]] std::optional<std::string_view> checkError(HeaderContent& fileHeader) const
+    [[nodiscard]] std::optional<std::string_view> checkError() const
     {
-        if (auto err = header.checkError(fileHeader); err)
-            return err;
         if (auto err = body.checkError(); err)
             return err;
         return std::nullopt;
     }
 };
+
+std::int16_t calculateSample(std::int32_t dequantizedResidual, const FrameContent::Body::LmsState& lms)
+{
+    std::int64_t predictedSample = 0;
+    for (std::size_t i = 0; i < lms.history.size(); ++i)
+    {
+        predictedSample += static_cast<std::int32_t>(lms.history[i]) * static_cast<std::int32_t>(lms.weights[i]);
+    }
+    predictedSample >>= 13;
+    return clampInt16(predictedSample + dequantizedResidual);
+}
+
+void updateLmsState(std::int32_t dequantizedResidual, FrameContent::Body::LmsState& lms, std::int16_t sample)
+{
+    // Reference decoder right shifts by 4, but that is implementation defined
+    const auto delta = static_cast<std::int32_t>(std::floor(dequantizedResidual / 16.0));
+    for (std::size_t i = 0; i < lms.history.size(); ++i)
+        lms.weights[i] += static_cast<std::int16_t>(lms.history[i] < 0 ? -delta : delta);
+    for (std::size_t i = 0; i < lms.history.size() - 1; ++i)
+        lms.history[i] = lms.history[i + 1];
+    lms.history[lms.history.size() - 1] = sample;
+}
 } // namespace
 
 namespace sf::priv
@@ -328,12 +386,10 @@ bool SoundFileReaderQoa::check(InputStream& stream)
     const auto headerContent = HeaderContent::readFrom(stream);
     if (!headerContent)
         return false;
-    if (!headerContent->isValid())
-        return false;
     const auto frameHeader = FrameContent::Header::readFrom(stream);
     if (!frameHeader)
         return false;
-    const auto frameHeaderError = frameHeader->checkError(*headerContent);
+    const auto frameHeaderError = frameHeader->checkError();
     return !frameHeaderError.has_value();
 }
 
@@ -342,7 +398,7 @@ bool SoundFileReaderQoa::check(InputStream& stream)
 std::optional<SoundFileReader::Info> SoundFileReaderQoa::open(InputStream& stream)
 {
     const auto headerContent = HeaderContent::readFrom(stream);
-    if (!headerContent || !headerContent->isValid())
+    if (!headerContent)
     {
         err() << "Header of QOA file was incorrectly verified or recently changed" << std::endl;
         return std::nullopt;
@@ -353,22 +409,36 @@ std::optional<SoundFileReader::Info> SoundFileReaderQoa::open(InputStream& strea
         err() << "Failed to read first frame header in QOA file" << std::endl;
         return std::nullopt;
     }
-    if (const auto error = firstFrameHeader->checkError(*headerContent); error)
+    if (const auto error = firstFrameHeader->checkError(); error)
     {
         err() << "Invalid QOA file frame header: " << *error << std::endl;
         return std::nullopt;
     }
 
-    m_channelCount = firstFrameHeader->numChannels;
-    m_sampleRate   = firstFrameHeader->sampleRate;
+    // Revert stream to before frame header
+    const auto currentStreamPosition = stream.tell();
+    const auto beforeFramePosition   = currentStreamPosition == std::nullopt
+                                           ? std::nullopt
+                                           : std::optional{*currentStreamPosition - QoaSpecs::frameHeaderSizeByte};
+    if (beforeFramePosition == std::nullopt || stream.seek(*beforeFramePosition) != *beforeFramePosition)
+    {
+        err() << "Failed to seek stream when reading QOA file";
+        return std::nullopt;
+    }
+
+    m_inputStream       = &stream;
+    m_channelCount      = firstFrameHeader->numChannels;
+    m_sampleRate        = firstFrameHeader->sampleRate;
+    m_samplesPerChannel = headerContent->samplesPerChannel;
     m_currentFrameSamples.clear();
     m_currentFrameNextSampleIndex = 0;
+    m_streamFirstFramePosition    = *beforeFramePosition;
 
     Info info{};
     info.channelCount = m_channelCount;
     info.sampleRate   = m_sampleRate;
     info.sampleCount  = headerContent->samplesPerChannel * info.channelCount;
-    info.channelMap   = QoaSpecs::getChannelMap(m_channelCount);
+    info.channelMap   = getChannelMap(m_channelCount);
 
     return info;
 }
@@ -377,6 +447,52 @@ std::optional<SoundFileReader::Info> SoundFileReaderQoa::open(InputStream& strea
 ////////////////////////////////////////////////////////////
 void SoundFileReaderQoa::seek(std::uint64_t sampleOffset)
 {
+    assert(m_inputStream && "Must open before seek");
+    if (sampleOffset >= m_samplesPerChannel * m_channelCount)
+    {
+        // Exoected to jump to EOF
+        const auto streamSize = m_inputStream->getSize();
+        if (streamSize != std::nullopt)
+        {
+            const auto actualPosition = m_inputStream->seek(*streamSize);
+            if (actualPosition != streamSize)
+                err() << "Failed to seek to EOF of QOA file" << std::endl;
+        }
+        // Update states
+        m_decodedSamplesPerChannel = m_samplesPerChannel;
+        m_currentFrameSamples.clear();
+        m_currentFrameNextSampleIndex = 0;
+        return;
+    }
+
+    assert(sampleOffset % m_channelCount == 0 && "Must seek to a sample of the first channel");
+    const auto containingSlicesIndexFromStart = sampleOffset / QoaSpecs::samplesPerSlice;
+    const auto containingFrameIndex = containingSlicesIndexFromStart / (QoaSpecs::maxFrameSlicesPerChannel * m_channelCount);
+    const auto frameSizeByte = QoaSpecs::frameHeaderSizeByte +
+                               (QoaSpecs::lmsStatePerChannelSizeByte +
+                                QoaSpecs::maxFrameSlicesPerChannel * QoaSpecs::sliceSizeByte) *
+                                   m_channelCount;
+    // Seek to the beginning of the containing frame
+    const auto streamPosition = m_streamFirstFramePosition + containingFrameIndex * frameSizeByte;
+    if (m_inputStream->seek(streamPosition) != streamPosition)
+        err() << "Failed to seek QOA file" << std::endl;
+    // Update states
+    m_currentFrameSamples.clear();
+    const auto previousFramesSamples = containingFrameIndex *
+                                       (QoaSpecs::maxFrameSlicesPerChannel * QoaSpecs::samplesPerSlice * m_channelCount);
+    m_decodedSamplesPerChannel = containingFrameIndex * QoaSpecs::maxFrameSlicesPerChannel * QoaSpecs::samplesPerSlice;
+    const auto maybeError      = decodeNextFrame();
+    if (maybeError != std::nullopt)
+    {
+        err() << "Failed to seek QOA file: " << *maybeError << std::endl;
+        return;
+    }
+    if (previousFramesSamples + m_currentFrameSamples.size() <= sampleOffset)
+    {
+        err() << "Fail to seek QOA file: Actual frame has less than expected number of samples" << std::endl;
+        return;
+    }
+    m_currentFrameNextSampleIndex = sampleOffset - previousFramesSamples;
 }
 
 
@@ -388,10 +504,12 @@ std::uint64_t SoundFileReaderQoa::read(std::int16_t* samples, std::uint64_t maxC
     {
         if (m_currentFrameNextSampleIndex >= m_currentFrameSamples.size())
         {
+            if (m_samplesPerChannel > 0 && m_decodedSamplesPerChannel >= m_samplesPerChannel)
+                break;
             if (const auto error = decodeNextFrame(); error)
             {
                 err() << "Failed to decode QOA file frame: " << *error << std::endl;
-                return maxCount - unfilledCount;
+                break;
             }
         }
         const auto filledSamples = readCurrentDecodedFrame(samples, unfilledCount);
@@ -399,16 +517,79 @@ std::uint64_t SoundFileReaderQoa::read(std::int16_t* samples, std::uint64_t maxC
         unfilledCount -= filledSamples;
         samples += filledSamples;
         if (unfilledCount == 0)
-            return maxCount;
+            break;
     }
-    assert(false);
-    return 0;
+    return maxCount - unfilledCount;
 }
 
 
 ////////////////////////////////////////////////////////////
 std::uint64_t SoundFileReaderQoa::readCurrentDecodedFrame(std::int16_t* samples, std::uint64_t maxCount)
 {
-    const auto remainingSamplesInFrame = m_currentFrameSamples.size() - m_currentFrameNextSampleIndex - 1;
+    const auto remainingSamplesInFrame = m_currentFrameSamples.size() - m_currentFrameNextSampleIndex;
+    if (remainingSamplesInFrame <= 0)
+        return 0;
+    const auto readSamplesCount = std::min<std::uint64_t>(remainingSamplesInFrame, maxCount);
+    std::memcpy(samples, m_currentFrameSamples.data() + m_currentFrameNextSampleIndex, readSamplesCount * sizeof(*samples));
+    m_currentFrameNextSampleIndex += readSamplesCount;
+    return readSamplesCount;
+}
+
+
+////////////////////////////////////////////////////////////
+std::optional<std::string_view> SoundFileReaderQoa::decodeNextFrame()
+{
+    // Validation
+    assert(m_inputStream != nullptr && "Reader did not open any stream");
+    auto maybeFrame = FrameContent::readFrom(*m_inputStream);
+    if (!maybeFrame)
+        return "Failed to read frame of QOA file";
+    if (const auto error = maybeFrame->checkError(); error)
+        return error;
+    auto& frame = maybeFrame.value();
+    if (frame.header.numChannels != m_channelCount)
+        return "Varying number of channels per frame in QOA file not supported";
+    if (frame.header.sampleRate != m_sampleRate)
+        return "Varying sample rate per frame in QOA file not supported";
+    const HeaderContent reconstructedHeader{m_samplesPerChannel};
+    if (!reconstructedHeader.isStreaming())
+    {
+        assert(m_decodedSamplesPerChannel < m_samplesPerChannel && "Cannot decode past specified number of samples");
+        if (frame.header.samplesPerChannel + m_decodedSamplesPerChannel > m_samplesPerChannel)
+            return "Samples in frames is more than specified number of samples in header of QOA files";
+    }
+    // Start decoding the frame
+    m_currentFrameSamples.resize(frame.header.samplesPerChannel * m_channelCount);
+    for (std::size_t channel = 0; channel < m_channelCount; ++channel)
+    {
+        auto&       lms                    = frame.body.lmsStatePerChannel[channel];
+        std::size_t channelSampleNextIndex = channel;
+        const auto  channelSlices          = frame.body.slicesPerChannel[channel];
+        // Decode the samples in each slice
+        std::uint16_t decodedSamples = 0;
+        for (std::size_t sliceIndex = 0; sliceIndex < frame.header.slicesPerChannel(); ++sliceIndex)
+        {
+            const auto& slice                = channelSlices[sliceIndex];
+            const auto  quantizedScaleFactor = slice.sfQuant();
+            for (std::size_t quantizedResidualIndex = 0; quantizedResidualIndex < QoaSpecs::samplesPerSlice;
+                 ++quantizedResidualIndex)
+            {
+                const auto dequantizedResidual = dequantTab[quantizedScaleFactor][slice.qr0x(quantizedResidualIndex)];
+                const auto sample              = calculateSample(dequantizedResidual, lms);
+                updateLmsState(dequantizedResidual, lms, sample);
+                // Fill samples buffer
+                m_currentFrameSamples[channelSampleNextIndex] = sample;
+                channelSampleNextIndex += m_channelCount;
+                ++decodedSamples;
+                if (decodedSamples >= frame.header.samplesPerChannel)
+                    break;
+            }
+            if (decodedSamples >= frame.header.samplesPerChannel)
+                break;
+        }
+    }
+    m_decodedSamplesPerChannel += frame.header.samplesPerChannel;
+    m_currentFrameNextSampleIndex = 0;
+    return std::nullopt;
 }
 } // namespace sf::priv

@@ -41,6 +41,7 @@ class InputStream;
 
 namespace sf::priv
 {
+
 ////////////////////////////////////////////////////////////
 /// \brief Implementation of sound file reader that handles wav files
 ///
@@ -110,7 +111,7 @@ private:
     /// \return Number of samples actually read (may be less than \a maxCount)
     ///
     ////////////////////////////////////////////////////////////
-    std::uint64_t readCurrentDecodedFrame(std::int16_t* samples, std::uint64_t maxCount);
+    [[nodiscard]] std::uint64_t readCurrentDecodedFrame(std::int16_t* samples, std::uint64_t maxCount);
 
     ////////////////////////////////////////////////////////////
     /// \brief Decode the next frame in the stream
@@ -118,15 +119,19 @@ private:
     /// \return An error message on failure and std::nullopt on success
     ///
     ////////////////////////////////////////////////////////////
-    std::optional<std::string_view> decodeNextFrame();
+    [[nodiscard]] std::optional<std::string_view> decodeNextFrame();
 
     ////////////////////////////////////////////////////////////
     // Member data
     ////////////////////////////////////////////////////////////
     std::uint32_t             m_channelCount{};      //!< Number of channels
     std::uint32_t             m_sampleRate{};        //!< Number of samples rate per channel
-    std::vector<std::int16_t> m_currentFrameSamples; //!< Decoded samples of last processed frame
-    std::uint32_t m_currentFrameNextSampleIndex{};   //!< Index of next unread sample in the last processed frame
+    std::uint32_t             m_samplesPerChannel{}; //!< Number of total samples per channel or zero if unspecified
+    std::uint64_t             m_decodedSamplesPerChannel{}; //!< Number of total samples decoded per channel
+    std::vector<std::int16_t> m_currentFrameSamples;        //!< Decoded samples of last processed frame
+    std::uint64_t m_currentFrameNextSampleIndex{};          //!< Index of next unread sample in the last processed frame
+    InputStream*  m_inputStream{};                          //!< The input stream received in the open method
+    std::uint64_t m_streamFirstFramePosition{};
 };
 
 } // namespace sf::priv
