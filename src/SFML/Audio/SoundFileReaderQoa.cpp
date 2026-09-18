@@ -45,28 +45,28 @@
 
 namespace
 {
-namespace qoa = sf::priv::qoaFile;
+namespace qoaFile = sf::priv::qoaFile;
 
 template <typename ReturnType, std::uint8_t ByteCount, typename Iter>
-ReturnType readBigEndianUnsignedInt(Iter begin)
+ReturnType readBigEndianUnsignedInt(Iter iter)
 {
     static_assert(std::is_unsigned_v<ReturnType>);
-    static_assert(std::is_same_v<std::uint8_t, std::decay_t<decltype(*begin)>>);
+    static_assert(std::is_same_v<std::uint8_t, std::decay_t<decltype(*iter)>>);
     static_assert(ByteCount >= 1 && ByteCount <= sizeof(ReturnType));
     ReturnType result = 0;
     for (std::size_t i = 0; i < ByteCount; ++i)
     {
-        result = static_cast<ReturnType>((result << 8) | *begin);
-        ++begin;
+        result = static_cast<ReturnType>((result << 8) | *iter);
+        ++iter;
     }
     return result;
 }
 
 template <typename ReturnType, typename Iter>
-inline ReturnType readBigEndianSignedInt(Iter begin)
+inline ReturnType readBigEndianSignedInt(Iter iter)
 {
     static_assert(std::is_signed_v<ReturnType>);
-    return static_cast<ReturnType>(readBigEndianUnsignedInt<std::make_unsigned_t<ReturnType>, sizeof(ReturnType)>(begin));
+    return static_cast<ReturnType>(readBigEndianUnsignedInt<std::make_unsigned_t<ReturnType>, sizeof(ReturnType)>(iter));
 }
 
 struct HeaderContent
@@ -80,7 +80,7 @@ struct HeaderContent
 
     static std::optional<HeaderContent> readFrom(sf::InputStream& stream)
     {
-        std::array<std::uint8_t, qoa::fileHeaderSizeByte::value> header{};
+        std::array<std::uint8_t, qoaFile::fileHeaderSizeByte::value> header{};
 
         if (stream.read(header.data(), header.size()) != header.size())
             return std::nullopt;
@@ -105,14 +105,14 @@ struct FrameContent
 
         [[nodiscard]] std::optional<std::string_view> checkError() const
         {
-            if (!qoa::isChannelCountValid(numChannels))
+            if (!qoaFile::isChannelCountValid(numChannels))
                 return "Number of channel in frame is not valid";
             if (!sf::priv::qoaFile::isSampleRateValid(sampleRate))
                 return "Frame sample rate is not in supported range";
-            const auto slices = qoa::samplesToSlices(samplesPerChannel);
-            if (slices > qoa::maxSlicesPerChannelPerFrame::value || slices <= 0)
+            const auto slices = qoaFile::samplesToSlices(samplesPerChannel);
+            if (slices > qoaFile::maxSlicesPerChannelPerFrame::value || slices <= 0)
                 return "Invalid number of samples per frame";
-            const auto computedFrameSizeByte = qoa::getFrameSizeByte(numChannels, slices);
+            const auto computedFrameSizeByte = qoaFile::getFrameSizeByte(numChannels, slices);
             const auto isFrameSizeMismatch   = frameSizeByte != computedFrameSizeByte;
             if (isFrameSizeMismatch)
                 return "Corrupted frame data";
@@ -135,21 +135,23 @@ struct FrameContent
 
     struct Body
     {
-        qoa::LmsState                                                                   lmsState;
-        std::vector<std::array<qoa::QoaSlice, qoa::maxSlicesPerChannelPerFrame::value>> slicesPerChannel;
+        qoaFile::LmsState                                                                       lmsState;
+        std::vector<std::array<qoaFile::QoaSlice, qoaFile::maxSlicesPerChannelPerFrame::value>> slicesPerChannel;
 
         [[nodiscard]] static std::optional<Body> readFrom(sf::InputStream& stream, const Header& header)
         {
-            thread_local std::array<std::uint8_t,
-                                    std::max<std::size_t>(qoa::lmsStatePerChannelSizeByte::value,
-                                                          qoa::sliceSizeByte::value * qoa::maxSlicesPerChannelPerFrame::value)>
-                 buffer;
+            constexpr auto slicesBufferLength = static_cast<std::uint32_t>(
+                qoaFile::sliceSizeByte::value * qoaFile::maxSlicesPerChannelPerFrame::value);
+            constexpr std::size_t allocatedBufferLength = std::max<std::uint32_t>(qoaFile::lmsStatePerChannelSizeByte::value,
+                                                                                  slicesBufferLength);
+            thread_local std::array<std::uint8_t, allocatedBufferLength> buffer{};
+
             Body body;
             body.lmsState.channels.resize(header.numChannels);
             for (auto& channelLmsState : body.lmsState.channels)
             {
-                if (stream.read(buffer.data(), qoa::lmsStatePerChannelSizeByte::value) !=
-                    qoa::lmsStatePerChannelSizeByte::value)
+                if (stream.read(buffer.data(), qoaFile::lmsStatePerChannelSizeByte::value) !=
+                    qoaFile::lmsStatePerChannelSizeByte::value)
                     return std::nullopt;
 
                 auto currentIter = buffer.begin();
@@ -164,15 +166,15 @@ struct FrameContent
                     currentIter += 2;
                 }
             }
-            const auto slicesPerChannel = qoa::samplesToSlices(header.samplesPerChannel);
+            const auto slicesPerChannel = qoaFile::samplesToSlices(header.samplesPerChannel);
             body.slicesPerChannel.resize(header.numChannels);
             for (std::size_t sliceIndex = 0; sliceIndex < slicesPerChannel; ++sliceIndex)
             {
                 for (auto& channelSlices : body.slicesPerChannel)
                 {
-                    if (stream.read(buffer.data(), qoa::sliceSizeByte::value) != qoa::sliceSizeByte::value)
+                    if (stream.read(buffer.data(), qoaFile::sliceSizeByte::value) != qoaFile::sliceSizeByte::value)
                         return std::nullopt;
-                    channelSlices[sliceIndex] = readBigEndianUnsignedInt<std::uint64_t, qoa::sliceSizeByte::value>(
+                    channelSlices[sliceIndex] = readBigEndianUnsignedInt<std::uint64_t, qoaFile::sliceSizeByte::value>(
                         buffer.begin());
                 }
             }
@@ -191,7 +193,7 @@ struct FrameContent
     [[nodiscard]] static std::optional<FrameContent> readFrom(sf::InputStream& stream)
     {
         auto header = Header::readFrom(stream);
-        if (!header || header->checkError() != std::nullopt)
+        if (!header || header->checkError())
             return std::nullopt;
         auto body = Body::readFrom(stream, *header);
         if (!body)
@@ -240,7 +242,7 @@ std::optional<SoundFileReader::Info> SoundFileReaderQoa::open(InputStream& strea
         err() << "Failed to read first frame header in QOA file" << std::endl;
         return std::nullopt;
     }
-    if (const auto error = firstFrameHeader->checkError(); error)
+    if (const auto error = firstFrameHeader->checkError())
     {
         err() << "Invalid QOA file frame header: " << *error << std::endl;
         return std::nullopt;
@@ -248,10 +250,10 @@ std::optional<SoundFileReader::Info> SoundFileReaderQoa::open(InputStream& strea
 
     // Revert stream to before frame header
     const auto currentStreamPosition = stream.tell();
-    const auto beforeFramePosition   = currentStreamPosition == std::nullopt
-                                           ? std::nullopt
-                                           : std::optional{*currentStreamPosition - qoaFile::frameHeaderSizeByte::value};
-    if (beforeFramePosition == std::nullopt || stream.seek(*beforeFramePosition) != *beforeFramePosition)
+    const auto beforeFramePosition   = currentStreamPosition
+                                           ? std::optional{*currentStreamPosition - qoaFile::frameHeaderSizeByte::value}
+                                           : std::nullopt;
+    if (!beforeFramePosition || stream.seek(*beforeFramePosition) != *beforeFramePosition)
     {
         err() << "Failed to seek stream when reading QOA file";
         return std::nullopt;
@@ -284,16 +286,20 @@ void SoundFileReaderQoa::seek(std::uint64_t rawSampleOffset)
         err() << "Failed to seek QOA file: exceed maximum number of samples" << std::endl;
         return;
     }
+
     const auto sampleOffset = static_cast<std::uint32_t>(rawSampleOffset);
-    if (sampleOffset >= m_samplesPerChannel * m_channelCount)
+    const auto isPastEnd    = sampleOffset / m_channelCount >= m_samplesPerChannel;
+    if (isPastEnd)
     {
         // Exoected to jump to EOF
         const auto streamSize = m_inputStream->getSize();
-        if (streamSize != std::nullopt)
+        if (!streamSize)
+            return;
+        const auto actualPosition = m_inputStream->seek(*streamSize);
+        if (actualPosition != streamSize)
         {
-            const auto actualPosition = m_inputStream->seek(*streamSize);
-            if (actualPosition != streamSize)
-                err() << "Failed to seek to EOF of QOA file" << std::endl;
+            err() << "Failed to seek to EOF of QOA file" << std::endl;
+            return;
         }
         // Update states
         m_decodedSamplesPerChannel = m_samplesPerChannel;
@@ -303,34 +309,34 @@ void SoundFileReaderQoa::seek(std::uint64_t rawSampleOffset)
     }
 
     assert(sampleOffset % m_channelCount == 0 && "Must seek to a sample of the first channel");
-    const auto containingSlicesIndexFromStart = sampleOffset / qoa::samplesPerSlice::value;
+    const auto containingSlicesIndexFromStart = sampleOffset / qoaFile::samplesPerSlice::value;
     const auto containingFrameIndex           = containingSlicesIndexFromStart /
-                                      (qoa::maxSlicesPerChannelPerFrame::value * m_channelCount);
-    const auto frameSizeByte = static_cast<std::uint16_t>(
-        qoaFile::frameHeaderSizeByte::value +
-        (qoa::lmsStatePerChannelSizeByte::value + qoa::maxSlicesPerChannelPerFrame::value * qoa::sliceSizeByte::value) *
-            m_channelCount);
+                                      (qoaFile::maxSlicesPerChannelPerFrame::value * m_channelCount);
+
     // Seek to the beginning of the containing frame
-    const auto streamPosition = m_streamFirstFramePosition + containingFrameIndex * frameSizeByte;
+    const auto streamPosition = m_streamFirstFramePosition + containingFrameIndex * qoaFile::getFrameSizeByte(m_channelCount);
     if (m_inputStream->seek(streamPosition) != streamPosition)
+    {
         err() << "Failed to seek QOA file" << std::endl;
+        return;
+    }
+
     // Update states
     m_currentFrameSamples.clear();
-    const auto previousFramesSamples = containingFrameIndex * (qoa::maxSlicesPerChannelPerFrame::value *
-                                                               qoa::samplesPerSlice::value * m_channelCount);
-    m_decodedSamplesPerChannel = containingFrameIndex * qoa::maxSlicesPerChannelPerFrame::value * qoa::samplesPerSlice::value;
-    const auto maybeError = decodeNextFrame();
-    if (maybeError != std::nullopt)
+    m_decodedSamplesPerChannel = containingFrameIndex * qoaFile::maxSlicesPerChannelPerFrame::value *
+                                 qoaFile::samplesPerSlice::value;
+    const auto decodedSamples = m_decodedSamplesPerChannel * m_channelCount;
+    if (const auto maybeError = decodeNextFrame())
     {
         err() << "Failed to seek QOA file: " << *maybeError << std::endl;
         return;
     }
-    if (previousFramesSamples + m_currentFrameSamples.size() <= sampleOffset)
+    if (decodedSamples + m_currentFrameSamples.size() <= sampleOffset)
     {
-        err() << "Fail to seek QOA file: Actual frame has less than expected number of samples" << std::endl;
+        err() << "Fail to seek QOA file: Actual frame has less than specified number of samples" << std::endl;
         return;
     }
-    m_currentFrameNextSampleIndex = static_cast<std::uint16_t>(sampleOffset - previousFramesSamples);
+    m_currentFrameNextSampleIndex = static_cast<std::uint16_t>(sampleOffset - decodedSamples);
 }
 
 
@@ -346,7 +352,7 @@ std::uint64_t SoundFileReaderQoa::read(std::int16_t* samples, std::uint64_t rawM
         {
             if (m_samplesPerChannel > 0 && m_decodedSamplesPerChannel >= m_samplesPerChannel)
                 break;
-            if (const auto error = decodeNextFrame(); error)
+            if (const auto error = decodeNextFrame())
             {
                 err() << "Failed to decode QOA file frame: " << *error << std::endl;
                 break;
@@ -371,7 +377,7 @@ std::uint16_t SoundFileReaderQoa::readCurrentDecodedFrame(std::int16_t* samples,
     if (remainingSamplesInFrame <= 0)
         return 0;
     const auto readSamplesCount = static_cast<std::uint16_t>(std::min<std::uint32_t>(remainingSamplesInFrame, maxCount));
-    std::memcpy(samples, m_currentFrameSamples.data() + m_currentFrameNextSampleIndex, readSamplesCount * sizeof(*samples));
+    std::memcpy(samples, m_currentFrameSamples.data() + m_currentFrameNextSampleIndex, readSamplesCount * 2);
     m_currentFrameNextSampleIndex += readSamplesCount;
     return readSamplesCount;
 }
@@ -381,17 +387,21 @@ std::uint16_t SoundFileReaderQoa::readCurrentDecodedFrame(std::int16_t* samples,
 std::optional<std::string_view> SoundFileReaderQoa::decodeNextFrame()
 {
     // Validation
-    assert(m_inputStream != nullptr && "Reader did not open any stream");
+    assert(m_inputStream && "Reader did not open any stream");
     auto maybeFrame = FrameContent::readFrom(*m_inputStream);
     if (!maybeFrame)
         return "Failed to read frame of QOA file";
+
     if (const auto error = maybeFrame->checkError(); error)
         return error;
+
     auto& frame = maybeFrame.value();
     if (frame.header.numChannels != m_channelCount)
         return "Varying number of channels per frame in QOA file not supported";
+
     if (frame.header.sampleRate != m_sampleRate)
         return "Varying sample rate per frame in QOA file not supported";
+
     const HeaderContent reconstructedHeader{m_samplesPerChannel};
     if (!reconstructedHeader.isStreaming())
     {
@@ -399,27 +409,29 @@ std::optional<std::string_view> SoundFileReaderQoa::decodeNextFrame()
         if (frame.header.samplesPerChannel + m_decodedSamplesPerChannel > m_samplesPerChannel)
             return "Samples in frames is more than specified number of samples in header of QOA files";
     }
+
     // Start decoding the frame
-    m_currentFrameSamples.resize(frame.header.samplesPerChannel * m_channelCount);
-    const auto slicesPerChannel = qoa::samplesToSlices(frame.header.samplesPerChannel);
+    const auto slicesPerChannel = qoaFile::samplesToSlices(frame.header.samplesPerChannel);
     auto&      lms              = frame.body.lmsState;
+    m_currentFrameSamples.resize(frame.header.samplesPerChannel * m_channelCount);
     for (std::uint8_t channel = 0; channel < m_channelCount; ++channel)
     {
         std::uint16_t channelSampleNextIndex = channel;
         const auto    channelSlices          = frame.body.slicesPerChannel[channel];
+        std::uint16_t decodedSamples         = 0;
+
         // Decode the samples in each slice
-        std::uint16_t decodedSamples = 0;
         for (std::uint16_t sliceIndex = 0; sliceIndex < slicesPerChannel; ++sliceIndex)
         {
             const auto& slice                = channelSlices[sliceIndex];
             const auto  quantizedScaleFactor = slice.sfQuant();
-            for (std::uint8_t quantizedResidualIndex = 0; quantizedResidualIndex < qoa::samplesPerSlice::value;
+            for (std::uint8_t quantizedResidualIndex = 0; quantizedResidualIndex < qoaFile::samplesPerSlice::value;
                  ++quantizedResidualIndex)
             {
                 const auto dequantizedResidual = qoaFile::dequantTable(quantizedScaleFactor,
                                                                        slice.qr0x(quantizedResidualIndex));
-                const auto sample              = qoa::calculateSample(dequantizedResidual, lms.predictSample(channel));
-                lms.updateLmsState(channel, dequantizedResidual, sample);
+                const auto sample = qoaFile::calculateSample(dequantizedResidual, lms.predictSample(channel));
+                lms.updateState(channel, dequantizedResidual, sample);
                 // Fill samples buffer
                 m_currentFrameSamples[channelSampleNextIndex] = sample;
                 channelSampleNextIndex += m_channelCount;
