@@ -25,18 +25,19 @@
 ////////////////////////////////////////////////////////////
 // Headers
 ////////////////////////////////////////////////////////////
-#include "SFML/Audio/SoundChannel.hpp"
-
+#include <SFML/Audio/SoundChannel.hpp>
 #include <SFML/Audio/SoundFileQoa.hpp>
 
 #include <array>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 #include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+
 
 namespace
 {
@@ -123,6 +124,7 @@ const std::array<std::vector<sf::SoundChannel>, maxChannels + 1> channelMaps = {
 template <typename Out, typename Num>
 constexpr Out clampInt(Num value)
 {
+    static_assert(std::is_signed_v<Out> == std::is_signed_v<Num>);
     constexpr auto min = std::numeric_limits<Out>::min();
     constexpr auto max = std::numeric_limits<Out>::max();
     return value < min ? min : value > max ? max : static_cast<Out>(value);
@@ -156,9 +158,9 @@ std::vector<SoundChannel> getChannelMap(std::uint8_t channelCount)
 
 std::uint16_t getFrameSizeByte(std::uint8_t channelCount, std::uint16_t slicesPerChannel)
 {
-    const auto result = static_cast<std::size_t>(
-        frameHeaderSizeByte::value +
-        (lmsStatePerChannelSizeByte::value + slicesPerChannel * sliceSizeByte::value) * channelCount);
+    const auto result = static_cast<std::uint64_t>(frameHeaderSizeByte::value) +
+                        channelCount * (static_cast<std::uint64_t>(slicesPerChannel) * sliceSizeByte::value +
+                                        lmsStatePerChannelSizeByte::value);
     assert(result <= std::numeric_limits<std::uint16_t>::max() && "Out of bounds calculation");
     return static_cast<std::uint16_t>(result);
 }
@@ -168,7 +170,7 @@ std::int16_t calculateSample(std::int32_t dequantizedResidual, std::int32_t pred
     return clampInt<std::int16_t>(dequantizedResidual + predictedSample);
 }
 
-QoaSlice::QoaSlice() : QoaSlice(0) {};
+QoaSlice::QoaSlice() : QoaSlice(0){};
 
 QoaSlice::QoaSlice(std::uint64_t bits) : m_bits{bits}
 {
@@ -205,15 +207,15 @@ std::int32_t LmsState::predictSample(std::uint8_t channel) const
         predictedSample += static_cast<std::int32_t>(channelState.history[i]) *
                            static_cast<std::int32_t>(channelState.weights[i]);
     }
-    // We are supposed to right shift by 13, but right shifting an integer is implementation defined
-    predictedSample = static_cast<decltype(predictedSample)>(std::floor(static_cast<double>(predictedSample) / (1 << 13)));
+    // We must right shift by 13, but that is implementation defined
+    predictedSample = static_cast<std::int64_t>(std::floor(static_cast<double>(predictedSample) / (1 << 13)));
     return clampInt<std::int32_t>(predictedSample);
 }
 
-void LmsState::updateLmsState(std::uint8_t channel, std::int32_t dequantizedResidual, std::int16_t sample)
+void LmsState::updateState(std::uint8_t channel, std::int32_t dequantizedResidual, std::int16_t sample)
 {
     auto& channelState = channels[channel];
-    // Reference decoder right shifts by 4, but that is implementation defined
+    // We must right shift by 4, but that is implementation defined
     const auto delta = static_cast<std::int32_t>(std::floor(dequantizedResidual / 16.0));
     for (std::size_t i = 0; i < channelState.history.size(); ++i)
         channelState.weights[i] += static_cast<std::int16_t>(channelState.history[i] < 0 ? -delta : delta);

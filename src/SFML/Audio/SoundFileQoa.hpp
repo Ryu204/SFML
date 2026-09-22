@@ -78,7 +78,7 @@ private:
 struct LmsState
 {
     [[nodiscard]] std ::int32_t predictSample(std::uint8_t channel) const;
-    void updateLmsState(std::uint8_t channel, std::int32_t dequantizedResidual, std::int16_t sample);
+    void updateState(std::uint8_t channel, std::int32_t dequantizedResidual, std::int16_t sample);
 
     struct PerChannelState
     {

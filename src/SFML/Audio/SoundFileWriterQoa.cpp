@@ -50,13 +50,13 @@
 namespace
 {
 template <std::size_t ByteCount, typename Iter>
-Iter writeBigEndianUnsignedInt(std::uint64_t value, Iter begin)
+Iter writeBigEndianUnsignedInt(std::uint64_t value, Iter iter)
 {
     static_assert(ByteCount > 0);
-    static_assert(std::is_same_v<std::uint8_t, std::decay_t<decltype(*begin)>>);
+    static_assert(std::is_same_v<std::uint8_t, std::decay_t<decltype(*iter)>>);
     if constexpr (ByteCount < sizeof(value))
         assert((value >> (ByteCount * 8)) == 0 && "Cannot represent value with specified number of bytes");
-    auto       currentByteIter = begin + ByteCount - 1;
+    auto       currentByteIter = iter + ByteCount - 1;
     const auto result          = currentByteIter + 1;
     for (std::size_t i = 0; i < ByteCount; ++i)
     {
@@ -85,15 +85,15 @@ sf::priv::qoaFile::LmsState createInitialLmsState(std::uint8_t numChannels)
 template <typename Iter>
 Iter writeLmsState(Iter begin, const sf::priv::qoaFile::LmsState& lms)
 {
-    auto it = begin;
+    auto iter = begin;
     for (const auto& channel : lms.channels)
     {
         for (const auto i : channel.history)
-            it = writeBigEndianSignedInt(i, it);
+            iter = writeBigEndianSignedInt(i, iter);
         for (const auto i : channel.weights)
-            it = writeBigEndianSignedInt(i, it);
+            iter = writeBigEndianSignedInt(i, iter);
     }
-    return it;
+    return iter;
 }
 
 constexpr std::array<std::int32_t, 16> reciprocalTable =
@@ -137,28 +137,34 @@ bool SoundFileWriterQoa::open(const std::filesystem::path&     filename,
         err() << "Unsupported channel count when writing QOA file" << std::endl;
         return false;
     }
+
     if (!qoaFile::isSampleRateValid(sampleRate))
     {
         err() << "Unsupported sample rate when writing QOA file" << std::endl;
         return false;
     }
+
     const auto targetChannelMap = qoaFile::getChannelMap(static_cast<std::uint8_t>(channelCount));
     if (!std::is_permutation(channelMap.begin(), channelMap.end(), targetChannelMap.begin()))
     {
         err() << "Unsupported channel when writing QOA file" << std::endl;
         return false;
     }
+
+    // Build the remap table
     assert(targetChannelMap.size() == channelCount && channelMap.size() == channelCount);
     m_remapTable.resize(channelCount);
     for (std::size_t i = 0; i < channelCount; ++i)
         m_remapTable[i] = static_cast<std::uint8_t>(
             std::find(targetChannelMap.begin(), targetChannelMap.end(), channelMap[i]) - targetChannelMap.begin());
+
     m_file.open(filename, std::ios_base::binary);
     if (!m_file)
     {
         err() << "Failed to open QOA file for writing\n" << formatDebugPathInfo(filename) << std::endl;
         return false;
     }
+
     assert(channelCount <= std::numeric_limits<std::uint8_t>::max() && "Should have been validated before");
     m_frameSharedData = FrameSharedData{
         static_cast<std::uint8_t>(channelCount),
@@ -177,14 +183,16 @@ void SoundFileWriterQoa::write(const std::int16_t* samples, std::uint64_t count)
         err() << "Cannot write to partial channels when writing QOA file" << std::endl;
         return;
     }
+
     const auto samplesPerChannel = count / numChannels;
     if (samplesPerChannel > std::numeric_limits<std::uint32_t>::max())
     {
         err() << "Number of samples out of supported range when writing QOA file" << std::endl;
         return;
     }
+
     std::vector<std::uint8_t> buffer;
-    if (const auto error = seekAndWriteHeader(static_cast<std::uint32_t>(samplesPerChannel), buffer); error)
+    if (const auto error = seekAndWriteHeader(static_cast<std::uint32_t>(samplesPerChannel), buffer))
     {
         err() << "Failed to write QOA file header: " << *error << std::endl;
         return;
@@ -198,11 +206,12 @@ void SoundFileWriterQoa::write(const std::int16_t* samples, std::uint64_t count)
     {
         const auto thisFrameSamples = static_cast<std::uint16_t>(
             std::min<std::uint64_t>(maxSamplesPerFrame, count - writtenSamples));
-        if (const auto error = writeFrame(samples, thisFrameSamples, lmsState, buffer); error)
+        if (const auto error = writeFrame(samples, thisFrameSamples, lmsState, buffer))
         {
             err() << "Failed to write QOA frame: " << *error << std::endl;
             return;
         }
+
         samples += thisFrameSamples;
         writtenSamples += thisFrameSamples;
     }
@@ -215,9 +224,11 @@ std::optional<std::string_view> SoundFileWriterQoa::seekAndWriteHeader(std::uint
     m_file.seekp(0);
     if (m_file.fail())
         return "Cannot seek to start of file";
+
     reusedContainer.resize(qoaFile::fileHeaderSizeByte::value);
     auto iter = writeBigEndianUnsignedInt<4>(qoaFile::magicBytes::value, reusedContainer.begin());
     writeBigEndianUnsignedInt<4>(samplesPerChannel, iter);
+
     m_file.write(reinterpret_cast<const char*>(reusedContainer.data()),
                  static_cast<std::streamsize>(reusedContainer.size()));
     if (m_file.fail() || m_file.bad())
@@ -233,20 +244,18 @@ std::optional<std::string_view> SoundFileWriterQoa::writeFrame(
     std::vector<std::uint8_t>& reusedContainer)
 {
     const auto numChannels = m_frameSharedData->numChannels;
-    assert(count <= static_cast<std::uint32_t>(m_frameSharedData->numChannels) *
-                        qoaFile::maxSlicesPerChannelPerFrame::value * qoaFile::samplesPerSlice::value &&
+    assert(count <= static_cast<std::uint32_t>(numChannels) * qoaFile::maxSlicesPerChannelPerFrame::value *
+                        qoaFile::samplesPerSlice::value &&
            "Too many samples in a single frame");
     const auto samplesPerChannel = static_cast<std::uint16_t>(count / numChannels);
-    const auto maybeHeaderError  = m_frameSharedData->writeFrameHeader(static_cast<std::uint16_t>(samplesPerChannel),
-                                                                      m_file,
-                                                                      reusedContainer);
-    if (maybeHeaderError.has_value())
+    const auto maybeHeaderError  = m_frameSharedData->writeFrameHeader(samplesPerChannel, m_file, reusedContainer);
+    if (maybeHeaderError)
         return maybeHeaderError;
 
     const auto frameBodySizeByte = qoaFile::getFrameSizeByte(m_frameSharedData->numChannels) -
                                    qoaFile::frameHeaderSizeByte::value;
-    reusedContainer.resize(static_cast<std::size_t>(frameBodySizeByte));
 
+    reusedContainer.resize(static_cast<std::size_t>(frameBodySizeByte));
     auto currentIter = reusedContainer.begin();
     currentIter      = writeLmsState(currentIter, lmsState);
 
@@ -256,6 +265,7 @@ std::optional<std::string_view> SoundFileWriterQoa::writeFrame(
         std::uint16_t encodedSamples           = 0;
         const auto*   channelSamples           = samples + mappedChannel;
         auto          prevQuantizedScaleFactor = 0;
+
         while (encodedSamples < samplesPerChannel)
         {
             const auto thisSliceSamples = static_cast<std::uint8_t>(
@@ -270,10 +280,10 @@ std::optional<std::string_view> SoundFileWriterQoa::writeFrame(
             {
                 // There is a strong correlation between scale factors of neighboring slices,
                 // so we start testing from the previous scale factor as an optimization.
-                std::uint8_t      quantizedScaleFactor = (scaleFactorIndex + prevQuantizedScaleFactor) & 0b1111;
-                auto              prevLmsState         = lmsState;
-                std::uint64_t     currentRank          = 0;
-                qoaFile::QoaSlice slice{quantizedScaleFactor};
+                const std::uint8_t quantizedScaleFactor = (scaleFactorIndex + prevQuantizedScaleFactor) & 0b1111;
+                auto               prevLmsState         = lmsState;
+                std::uint64_t      currentRank          = 0;
+                qoaFile::QoaSlice  slice{quantizedScaleFactor};
                 for (std::uint16_t sampleIndex = encodedSamples; sampleIndex < encodedSamples + thisSliceSamples;
                      ++sampleIndex)
                 {
@@ -300,7 +310,7 @@ std::optional<std::string_view> SoundFileWriterQoa::writeFrame(
                     currentRank += static_cast<std::uint64_t>(error * error + weightPenalty * weightPenalty);
                     if (currentRank > bestRank)
                         break;
-                    prevLmsState.updateLmsState(mappedChannel, dequantizedResidual, reconstructedSample);
+                    prevLmsState.updateState(mappedChannel, dequantizedResidual, reconstructedSample);
                     slice = (slice.raw() << 3) | quantizedResidual;
                 }
 
