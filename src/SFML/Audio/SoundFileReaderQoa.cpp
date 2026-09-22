@@ -154,6 +154,7 @@ struct FrameContent
                     qoaFile::lmsStatePerChannelSizeByte::value)
                     return std::nullopt;
 
+                // NOLINTNEXTLINE(readability-qualified-auto)
                 auto currentIter = buffer.begin();
                 for (auto& elem : channelLmsState.history)
                 {
